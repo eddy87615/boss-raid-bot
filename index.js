@@ -212,10 +212,10 @@ client.on('interactionCreate', async (interaction) => {
     interaction.isModalSubmit() &&
     interaction.customId.startsWith('register_')
   ) {
-    const parts = interaction.customId.split('_');
-    // register_{bossId}_{job} → parts[1] = bossId, parts[2..] = job（職業名可能有底線）
-    const bossId = parts[1];
-    const job = parts.slice(2).join('_');
+    const withoutPrefix = interaction.customId.replace('register_', '');
+    const separatorIndex = withoutPrefix.lastIndexOf('_');
+    const bossId = withoutPrefix.substring(0, separatorIndex);
+    const job = withoutPrefix.substring(separatorIndex + 1);
     const boss = BOSSES.find((b) => b.id === bossId);
 
     const charName = interaction.fields.getTextInputValue('char_name');
