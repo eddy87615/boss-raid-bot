@@ -171,6 +171,7 @@ client.on('interactionCreate', async (interaction) => {
       components: [row],
       ephemeral: true,
     });
+    setTimeout(() => interaction.deleteReply().catch(() => {}), 30 * 1000);
     return;
   }
 
@@ -217,9 +218,15 @@ client.on('interactionCreate', async (interaction) => {
     const bossId = withoutPrefix.substring(0, separatorIndex);
     const job = withoutPrefix.substring(separatorIndex + 1);
     const boss = BOSSES.find((b) => b.id === bossId);
-
     const charName = interaction.fields.getTextInputValue('char_name');
     const charLevel = interaction.fields.getTextInputValue('char_level');
+    if (!/^\d+$/.test(charLevel)) {
+      await interaction.reply({
+        content: '❌ 等級只能輸入數字，請重新報名。',
+        ephemeral: true,
+      });
+      return;
+    }
     const guild = interaction.guild;
 
     // 找或建立身分組
@@ -239,12 +246,20 @@ client.on('interactionCreate', async (interaction) => {
     );
 
     if (raidChannel) {
-      await updateRaidMessage(raidChannel, boss, {
+      const result = await updateRaidMessage(raidChannel, boss, {
         charName,
         charLevel,
         job,
         userId: interaction.user.id,
       });
+
+      if (result?.duplicate) {
+        await interaction.reply({
+          content: `❌ 角色 **${charName}** 已經報名過 **${boss.name}** 遠征團了。`,
+          ephemeral: true,
+        });
+        return;
+      }
     }
 
     await interaction.reply({
@@ -270,13 +285,13 @@ async function updateRaidMessage(channel, boss, newEntry) {
 
   // 同一個 userId 重複報名 → 更新資料
   const existingIndex = raidData[boss.id].findIndex(
-    (e) => e.userId === newEntry.userId,
+    (e) => e.charName === newEntry.charName,
   );
   if (existingIndex >= 0) {
-    raidData[boss.id][existingIndex] = newEntry;
-  } else {
-    raidData[boss.id].push(newEntry);
+    // 角色名稱重複，拒絕報名
+    return { duplicate: true };
   }
+  raidData[boss.id].push(newEntry);
 
   const list = raidData[boss.id]
     .map((e, i) => `${i + 1}. ${e.charName} / ${e.charLevel} / ${e.job}`)
@@ -297,6 +312,7 @@ async function updateRaidMessage(channel, boss, newEntry) {
 
   const sent = await channel.send(content);
   raidMessageMap[channel.id] = sent.id;
+  return {};
 }
 // ======================================================
 
