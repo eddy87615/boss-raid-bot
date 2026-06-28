@@ -51,8 +51,6 @@ const JOBS = [
   '暗影堔偷',
 ];
 
-const RAID_CHANNEL_PREFIX = 'raid-';
-// 報名訊息幾秒後消失（ephemeral 回覆）
 const REPLY_DELETE_SECONDS = 8;
 // ================================================
 
@@ -61,11 +59,13 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
   ],
 });
 
-// 儲存每個頻道的名單訊息 ID { channelId: messageId }
 const raidMessageMap = {};
+const pinnedMessageMap = {};
+const raidData = {};
 
 // ==================== Keep-alive server ====================
 const app = express();
@@ -75,7 +75,6 @@ app.listen(PORT, () =>
   console.log(`Keep-alive server running on port ${PORT}`),
 );
 
-// 每 14 分鐘 ping 自己（防 Render 休眠）
 const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 setInterval(
   () => {
@@ -93,6 +92,15 @@ client.once('ready', async () => {
     new SlashCommandBuilder()
       .setName('setup')
       .setDescription('在此頻道發送 BOSS 報名面板'),
+    new SlashCommandBuilder()
+      .setName('pin')
+      .setDescription('設定此頻道的置底訊息')
+      .addStringOption((option) =>
+        option
+          .setName('content')
+          .setDescription('置底訊息內容')
+          .setRequired(true),
+      ),
   ].map((cmd) => cmd.toJSON());
 
   const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
@@ -125,10 +133,9 @@ client.once('ready', async () => {
 
 // ==================== 指令處理 ====================
 client.on('interactionCreate', async (interaction) => {
-  // /setup 指令 → 發送報名面板
+  // /setup
   if (interaction.isChatInputCommand() && interaction.commandName === 'setup') {
     const rows = [];
-    // 每行最多 5 個按鈕
     for (let i = 0; i < BOSSES.length; i += 5) {
       const row = new ActionRowBuilder();
       BOSSES.slice(i, i + 5).forEach((boss) => {
@@ -151,7 +158,26 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // 按下 BOSS 按鈕 → 跳出職業選單
+  // /pin
+  if (interaction.isChatInputCommand() && interaction.commandName === 'pin') {
+    const content = interaction.options.getString('content');
+    const channel = interaction.channel;
+
+    if (pinnedMessageMap[channel.id]) {
+      const old = await channel.messages
+        .fetch(pinnedMessageMap[channel.id].messageId)
+        .catch(() => null);
+      if (old) await old.delete().catch(() => {});
+    }
+
+    const sent = await channel.send(content);
+    pinnedMessageMap[channel.id] = { messageId: sent.id, content };
+
+    await interaction.reply({ content: '✅ 置底訊息已設定', ephemeral: true });
+    return;
+  }
+
+  // BOSS 按鈕 → 職業選單
   if (
     interaction.isButton() &&
     interaction.customId.startsWith('select_boss_')
@@ -175,7 +201,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // 選完職業 → 跳出 Modal
+  // 職業選單 → Modal
   if (
     interaction.isStringSelectMenu() &&
     interaction.customId.startsWith('select_job_')
@@ -187,28 +213,28 @@ client.on('interactionCreate', async (interaction) => {
       .setCustomId(`register_${bossId}_${selectedJob}`)
       .setTitle('填寫報名資料');
 
-    const nameInput = new TextInputBuilder()
-      .setCustomId('char_name')
-      .setLabel('角色名稱')
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true);
-
-    const levelInput = new TextInputBuilder()
-      .setCustomId('char_level')
-      .setLabel('等級')
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true);
-
     modal.addComponents(
-      new ActionRowBuilder().addComponents(nameInput),
-      new ActionRowBuilder().addComponents(levelInput),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('char_name')
+          .setLabel('角色名稱')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true),
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('char_level')
+          .setLabel('等級')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true),
+      ),
     );
 
     await interaction.showModal(modal);
     return;
   }
 
-  // Modal 送出 → 指派身分組 + 更新名單
+  // Modal 送出
   if (
     interaction.isModalSubmit() &&
     interaction.customId.startsWith('register_')
@@ -218,8 +244,10 @@ client.on('interactionCreate', async (interaction) => {
     const bossId = withoutPrefix.substring(0, separatorIndex);
     const job = withoutPrefix.substring(separatorIndex + 1);
     const boss = BOSSES.find((b) => b.id === bossId);
+
     const charName = interaction.fields.getTextInputValue('char_name');
     const charLevel = interaction.fields.getTextInputValue('char_level');
+
     if (!/^\d+$/.test(charLevel)) {
       await interaction.reply({
         content: '❌ 等級只能輸入數字，請重新報名。',
@@ -227,9 +255,9 @@ client.on('interactionCreate', async (interaction) => {
       });
       return;
     }
+
     const guild = interaction.guild;
 
-    // 找或建立身分組
     let role = guild.roles.cache.find((r) => r.name === boss.name);
     if (!role) {
       role = await guild.roles.create({
@@ -239,10 +267,8 @@ client.on('interactionCreate', async (interaction) => {
     }
     await interaction.member.roles.add(role);
 
-    // 找對應頻道
-    const channelName = boss.channel;
     const raidChannel = guild.channels.cache.find(
-      (c) => c.name === channelName,
+      (c) => c.name === boss.channel,
     );
 
     if (raidChannel) {
@@ -266,8 +292,6 @@ client.on('interactionCreate', async (interaction) => {
       content: `✅ 報名成功！已加入 **${boss.name}** 遠征團\n角色：${charName} / ${charLevel} / ${job}`,
       ephemeral: true,
     });
-
-    // 幾秒後刪除 ephemeral 回覆
     setTimeout(
       () => interaction.deleteReply().catch(() => {}),
       REPLY_DELETE_SECONDS * 1000,
@@ -276,21 +300,31 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// ==================== 名單訊息管理 ====================
-// 儲存每個 boss 頻道的報名資料 { bossId: [ { charName, charLevel, job, userId } ] }
-const raidData = {};
+// ==================== 置底訊息監聽 ====================
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+  const pinned = pinnedMessageMap[message.channelId];
+  if (!pinned) return;
+  if (message.id === pinned.messageId) return;
 
+  const old = await message.channel.messages
+    .fetch(pinned.messageId)
+    .catch(() => null);
+  if (old) await old.delete().catch(() => {});
+
+  const sent = await message.channel.send(pinned.content);
+  pinnedMessageMap[message.channelId].messageId = sent.id;
+});
+
+// ==================== 名單訊息管理 ====================
 async function updateRaidMessage(channel, boss, newEntry) {
   if (!raidData[boss.id]) raidData[boss.id] = [];
 
-  // 同一個 userId 重複報名 → 更新資料
   const existingIndex = raidData[boss.id].findIndex(
     (e) => e.charName === newEntry.charName,
   );
-  if (existingIndex >= 0) {
-    // 角色名稱重複，拒絕報名
-    return { duplicate: true };
-  }
+  if (existingIndex >= 0) return { duplicate: true };
+
   raidData[boss.id].push(newEntry);
 
   const list = raidData[boss.id]
@@ -299,21 +333,17 @@ async function updateRaidMessage(channel, boss, newEntry) {
 
   const content = `**${boss.emoji} ${boss.name} 遠征團**\n參團者名單\n\n${list}`;
 
-  // 更新或發送新訊息
+  // 刪舊的，重發（置底效果）
   if (raidMessageMap[channel.id]) {
-    const msg = await channel.messages
+    const old = await channel.messages
       .fetch(raidMessageMap[channel.id])
       .catch(() => null);
-    if (msg) {
-      await msg.edit(content);
-      return;
-    }
+    if (old) await old.delete().catch(() => {});
   }
 
   const sent = await channel.send(content);
   raidMessageMap[channel.id] = sent.id;
   return {};
 }
-// ======================================================
 
 client.login(process.env.TOKEN);
